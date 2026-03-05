@@ -17,6 +17,11 @@
 - ✅ Безопасное хранение токена через `.env`
 
 Установка:
-pip install aiogram python-dotenv
-Скопировать bot.py себе
+
+- pip install aiogram python-dotenv
+- Скопировать bot.py 
+
+
+
+
 MIT
