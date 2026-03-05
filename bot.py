@@ -6,11 +6,18 @@ from aiogram.types import Message
 import os
 from dotenv import load_dotenv
 
+load_dotenv()
 TOKEN = os.getenv("TOKEN")
+
+if not TOKEN:
+    raise RuntimeError("TOKEN not found in environment variables")
 # Кто может управлять игрой
-ADMIN_IDS = set(
-    map(int, os.getenv("ADMIN_IDS", "").split(","))
-)
+admin_raw = os.getenv("ADMIN_IDS", "")
+
+ADMIN_IDS = set()
+
+if admin_raw.strip():
+    ADMIN_IDS = set(map(int, admin_raw.split(",")))
 
 KEY_WORDS = { }
 
