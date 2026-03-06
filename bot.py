@@ -1,96 +1,185 @@
 import asyncio
 import re
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message
 import os
+
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.filters import Command
 from dotenv import load_dotenv
 
-load_dotenv()
-TOKEN = os.getenv("TOKEN")
 
+# ─────────────────────────────────────────────
+# Конфигурация
+# ─────────────────────────────────────────────
+
+load_dotenv()
+
+TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN not found in environment variables")
-# Кто может управлять игрой
+
 admin_raw = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = set(map(int, admin_raw.split(","))) if admin_raw.strip() else set()
 
-ADMIN_IDS = set()
 
-if admin_raw.strip():
-    ADMIN_IDS = set(map(int, admin_raw.split(",")))
+# ─────────────────────────────────────────────
+# Регулярка для извлечения слов
+# ─────────────────────────────────────────────
+# Используем её чтобы достать слова из текста.
 
-KEY_WORDS = { }
+WORD_PATTERN = re.compile(r"\b[а-яёa-z]+\b", re.IGNORECASE)
 
-game_active = True
-waiting_admin_word_input = False
 
-# user_id → set найденных частей (только те, что отправлены ОТДЕЛЬНЫМ сообщением)
-progress = {}           # str → set[str]
+# ─────────────────────────────────────────────
+# Состояние игры
+# ─────────────────────────────────────────────
 
-# user_id → bool (уже получил подсказку "Ты очень близок...")
-notified = {}        # просто множество id пользователей
+class GameState:
+
+    def __init__(self):
+
+        # игра включена / выключена
+        self.active = False
+
+        # ждём ввод слов от админа
+        self.waiting_admin_input = False
+
+        # ключевые слова
+        self.key_words = set()
+
+        # user_id → найденные слова
+        self.progress = {}
+
+        # user_id → слова по которым уже давали подсказку
+        self.notified = {}
+
+    def reset(self):
+
+        self.progress.clear()
+        self.notified.clear()
+
+
+game = GameState()
+
+
+# ─────────────────────────────────────────────
+# Telegram
+# ─────────────────────────────────────────────
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ─── Команды админа ────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# Утилиты
+# ─────────────────────────────────────────────
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
+def extract_words(text: str):
+    """
+    Извлекаем слова из сообщения.
+
+    Используем regex чтобы:
+    - убрать пунктуацию
+    - получить слова строго целиком
+    """
+
+    return [w.lower() for w in WORD_PATTERN.findall(text)]
+
+
+def mention_user(message: Message):
+
+    if message.from_user.username:
+        return f"@{message.from_user.username}"
+
+    return message.from_user.full_name
+
+
+# ─────────────────────────────────────────────
+# Команды админа
+# ─────────────────────────────────────────────
 
 @dp.message(Command("start_game", "restart_game"))
 async def cmd_start(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+
+    if not is_admin(message.from_user.id):
         return
-    global game_active
-    game_active = True
-    progress.clear()
-    notified.clear()
-    await message.reply("Игра запущена / перезапущена. Три слова спрятаны.")
+
+    game.active = True
+    game.reset()
+
+    await message.reply(
+        "Игра запущена / перезапущена.\n"
+        "Три слова спрятаны."
+    )
 
 
 @dp.message(Command("stop_game"))
 async def cmd_stop(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+
+    if not is_admin(message.from_user.id):
         return
-    global game_active
-    game_active = False
+
+    game.active = False
+
     await message.reply("Игра остановлена.")
 
-@dp.message(Command("add_game"))
-async def add_game(message: Message):
-    global waiting_admin_word_input
 
-    if message.from_user.id not in ADMIN_IDS:
+@dp.message(Command("add_game"))
+async def cmd_add_game(message: Message):
+
+    if not is_admin(message.from_user.id):
         return
 
-    waiting_admin_word_input = True
+    game.waiting_admin_input = True
+
     await message.reply(
-        "Отправь 3 слова через пробел.\n"
+        "Отправь 3 слова через пробел.\n\n"
         "Например:\n"
         "гибель рисового душ"
     )
 
-# ─── Основная логика ───────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# Основной обработчик
+# ─────────────────────────────────────────────
 
 @dp.message()
 async def game_handler(message: Message):
-    global waiting_admin_word_input, KEY_WORDS
-    if waiting_admin_word_input and message.from_user.id in ADMIN_IDS:
 
-        words = message.text.lower().split()
+    if not message.text:
+        return
+
+    text = message.text.strip()
+
+    # команды дальше не обрабатываем
+    if text.startswith("/"):
+        return
+
+    words = extract_words(text)
+
+    if not words:
+        return
+
+    uid = str(message.from_user.id)
+
+    # ─────────────────────────
+    # Ввод слов админом
+    # ─────────────────────────
+
+    if game.waiting_admin_input and is_admin(message.from_user.id):
 
         if len(words) != 3:
             await message.reply("Нужно отправить ровно 3 слова")
             return
 
-        KEY_WORDS.clear()
+        game.key_words = set(words)
 
-        KEY_WORDS[words[0]] = "PART1"
-        KEY_WORDS[words[1]] = "PART2"
-        KEY_WORDS[words[2]] = "PART3"
-
-        progress.clear()
-        notified.clear()
-
-        waiting_admin_word_input = False
+        game.reset()
+        game.waiting_admin_input = False
 
         await message.reply(
             "🎮 Новая игра началась!\n\n"
@@ -99,93 +188,116 @@ async def game_handler(message: Message):
         )
 
         return
-    global game_active
-    if not game_active:
+
+    # ─────────────────────────
+    # Игра выключена
+    # ─────────────────────────
+
+    if not game.active:
         return
-    if not message.text:
-        return
 
-    text = message.text.strip()
-    lower_text = text.lower()
-    solution = " ".join(KEY_WORDS.keys())
+    # ─────────────────────────
+    # Проверка победы
+    # ─────────────────────────
 
-    if solution and solution == lower_text:
-        game_active = False
+    if set(words) == game.key_words:
 
-        uid = str(message.from_user.id)
-
-        username = message.from_user.username or message.from_user.first_name
-        mention = f"@{username}" if message.from_user.username else message.from_user.full_name
+        game.active = False
 
         await message.reply(
             f"🏆 ПОБЕДИТЕЛЬ!\n"
-            f"{mention} собрал все ключевые слова!\n\n"
-            f"Слова: {' · '.join(KEY_WORDS.keys())}"
+            f"{mention_user(message)} собрал все ключевые слова!\n\n"
+            f"Слова: {' · '.join(game.key_words)}"
         )
 
         return
 
-    if lower_text.startswith("/"):
-        return
+    # ─────────────────────────
+    # Режим подсказки (>3 слов)
+    # ─────────────────────────
 
-    uid = str(message.from_user.id)
-    if uid not in notified:
-        notified[uid] = set()
+    if len(words) > 3:
 
-    # ─── Проверяем наличие любого ключевого слова в сообщении ───
-    for word in KEY_WORDS:
+        found = set(words) & game.key_words
 
-        if re.search(r'\b' + re.escape(word) + r'\b', lower_text):
+        if found:
 
-            if word not in notified[uid]:
-                notified[uid].add(word)
+            if uid not in game.notified:
+                game.notified[uid] = set()
+
+            new_words = found - game.notified[uid]
+
+            if new_words:
+
+                game.notified[uid].update(new_words)
 
                 await message.reply(
-                    "Ты очень близок, найди нужное слово! 🔑"
+                    "Тут есть правильные слова"
                 )
-        # ← после этого больше не даём эту фразу
 
-    # ─── Проверяем, является ли сообщение ОДНИМ точным словом ───
-    # Убираем знаки препинания по краям (душ. → душ, "душ" → душ и т.д.)
-    clean = re.sub(r'^[^\wа-яА-ЯёЁ]+|[^\wа-яА-ЯёЁ]+$', '', text).strip()
-    clean_lower = clean.lower()
+        return
 
-    part = None
-    for word, p in KEY_WORDS.items():
-        if clean_lower == word:
-            part = p
-            break
+    # ─────────────────────────
+    # Попытка угадать (≤3 слов)
+    # ─────────────────────────
 
-    if part is None:
-        return  # не отдельное правильное слово → дальше не идём
+    correct = [w for w in words if w in game.key_words]
 
-    # ─── Засчитываем ───
-    if uid not in progress:
-        progress[uid] = set()
+    if not correct:
+        return
 
-    if part in progress[uid]:
-        return  # уже было засчитано
+    # часть слов правильная
+    if len(correct) != len(words):
 
-    progress[uid].add(part)
-    count = len(progress[uid])
+        await message.reply(
+            "Тут есть правильное слово 😉"
+        )
 
-    username = message.from_user.username or message.from_user.first_name
-    mention = f"@{username}" if message.from_user.username else message.from_user.full_name
+        return
+
+    # ─────────────────────────
+    # Засчитываем слова
+    # ─────────────────────────
+
+    if uid not in game.progress:
+        game.progress[uid] = set()
+
+    new_words = set(correct) - game.progress[uid]
+
+    if not new_words:
+        return
+
+    game.progress[uid].update(new_words)
+
+    count = len(game.progress[uid])
 
     if count == 3:
-        game_active = False
-        words = " · ".join(KEY_WORDS.keys())
+
+        game.active = False
+
         await message.reply(
             f"🏆 ПОБЕДИТЕЛЬ!\n"
-            f"{mention} собрал все 3 части ключа!\n\n"
-            f"Слова: {words}"
+            f"{mention_user(message)} собрал все части ключа!\n\n"
+            f"Слова: {' · '.join(game.key_words)}"
         )
+
     else:
-        # Вот то, чего не хватало — сообщение при засчитывании части
-        await message.reply(f"✅ Часть ключа засчитана! ({count}/3)")
+
+        await message.reply(
+            f"✅ Часть ключа засчитана ({count}/3)"
+        )
+
+
+# ─────────────────────────────────────────────
+# Запуск
+# ─────────────────────────────────────────────
 
 async def main():
+
     print("Бот запущен...")
+
     await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
     asyncio.run(main())
